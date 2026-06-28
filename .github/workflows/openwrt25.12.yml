@@ -89,18 +89,36 @@ jobs:
           PATCHES=../patch-src/openwrt-25.12/patches
 
           # 1) 完整替换 uboot-rockchip 包：在官方包基础上叠加 R4S 1G(DDR3)/4G(LPDDR4)
-          #    自动识别补丁（309/310），以及一系列 R4S 相关的既有修复（301-308, 003-005）
+          #    自动识别补丁（309/310），以及一系列既有修复（301-308, 003-005）。
+          #    这部分都是 rk3399/通用构建修复，跟 R4S 直接相关，全量保留。
           rm -rf package/boot/uboot-rockchip
           cp -R "$PATCHES/package/uboot-rockchip" package/boot/
 
-          # 2) 叠加内核补丁：R4S 关闭 SD 卡 UHS 模式、修复 PCIe PHY 复位等已知问题
-          #    用 rsync 合并进 target/linux/rockchip，会自动放进 patches-x.y 目录
-          #    并顺带覆盖 image/armv8.mk（官方文件+追加了 kmod-r8168）
-          rsync -av "$PATCHES/target/" target/
+          # 2) 内核补丁：只挑跟 R4S(rk3399) 或通用 rockchip 相关的几个，
+          #    不引入 R2S(rk3328) 专用补丁 —— 这些补丁会改动其他无关板子的
+          #    .dts 文件，一旦上游那些文件发生变动就可能 hunk 对不上而报错
+          #    （101、610 是 R2S 专用，且 610 已经在上游漂移后失败过一次）。
+          KDIR=$(find target/linux/rockchip -maxdepth 1 -type d -name "patches-*" | head -n1)
+          echo "内核补丁目录: $KDIR"
+          for p in 103-arm64-dts-rockchip-lower-mmc-speed.patch \
+                   402-1-rk3399-fix-pci-phy-reset-on-probe.patch \
+                   501-mmc-core-set-initial-signal-voltage-on-power-off.patch; do
+            SRC="$PATCHES/target/linux/rockchip/$(basename "$KDIR")/$p"
+            if [ -f "$SRC" ]; then
+              cp "$SRC" "$KDIR/"
+              echo "已加入: $p"
+            else
+              echo "警告：没找到 $p（可能补丁集目录结构变了，跳过）"
+            fi
+          done
+
+          # 3) image/armv8.mk 是完整文件覆盖（官方文件 + 追加 kmod-r8168），不是 diff，
+          #    直接复制不存在 hunk 失败的风险
+          cp "$PATCHES/target/linux/rockchip/image/armv8.mk" target/linux/rockchip/image/armv8.mk
 
           echo "补丁应用完成，列出关键文件确认："
           ls package/boot/uboot-rockchip/patches/ | grep -E "30[0-9]|31[0]"
-          find target/linux/rockchip -path "*patches-*" -iname "*r4s*" -o -iname "*nanopi*" | grep -i patches || true
+          ls "$KDIR" | grep -E "103-|402-1|501-"
 
       - name: 更新并安装 feeds
         working-directory: openwrt
