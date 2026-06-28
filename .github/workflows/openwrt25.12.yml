@@ -49,7 +49,7 @@ jobs:
   build:
     needs: check-update
     if: needs.check-update.outputs.should_build == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: self-hosted
     timeout-minutes: 300
     steps:
       - name: 释放磁盘空间
