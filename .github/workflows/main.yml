@@ -1,0 +1,134 @@
+name: 编译 luci-app-homebox (ImmortalWrt 25.12 / apk)
+
+on:
+  workflow_dispatch:
+    inputs:
+      immortalwrt_version:
+        description: "ImmortalWrt 版本号"
+        required: true
+        default: "25.12.0"
+      target:
+        description: "target（通用ARM64软路由用 armsr，树莓派4用 bcm27xx）"
+        required: true
+        default: "armsr"
+      subtarget:
+        description: "subtarget（armsr 对应 armv8，树莓派4 对应 bcm2711）"
+        required: true
+        default: "armv8"
+      feed_repo:
+        description: "homebox 源码仓库"
+        required: true
+        default: "https://github.com/jjm2473/openwrt-apps.git"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo docker image prune -a -f 2>/dev/null || true
+          df -h
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget zstd \
+            jq curl
+          node -v && npm -v
+
+      - name: 查找并下载 ImmortalWrt SDK
+        run: |
+          set -e
+          BASE="https://downloads.immortalwrt.org/releases/${{ inputs.immortalwrt_version }}/targets/${{ inputs.target }}/${{ inputs.subtarget }}"
+          echo "目标目录: $BASE"
+          LISTING=$(curl -fsSL "$BASE/")
+          SDK_FILE=$(echo "$LISTING" | grep -oE 'immortalwrt-sdk-[^"<> ]+\.(tar\.zst|tar\.xz)' | sort -u | head -n1)
+          if [ -z "$SDK_FILE" ]; then
+            echo "未能在 $BASE 找到 SDK 文件，请检查 version/target/subtarget 是否正确"
+            echo "$LISTING" | grep -i sdk || true
+            exit 1
+          fi
+          echo "SDK_FILE=$SDK_FILE" >> "$GITHUB_ENV"
+          echo "SDK_URL=$BASE/$SDK_FILE" >> "$GITHUB_ENV"
+          echo "找到 SDK: $BASE/$SDK_FILE"
+
+      - name: 解压 SDK
+        run: |
+          set -e
+          curl -fsSL -o "$SDK_FILE" "$SDK_URL"
+          mkdir -p sdk
+          if [[ "$SDK_FILE" == *.tar.zst ]]; then
+            tar --use-compress-program=unzstd -xf "$SDK_FILE" -C sdk --strip-components=1
+          else
+            tar -xf "$SDK_FILE" -C sdk --strip-components=1
+          fi
+          ls sdk
+
+      - name: 添加 homebox 源码 feed
+        working-directory: sdk
+        run: |
+          echo "src-git jjm2473 ${{ inputs.feed_repo }}" >> feeds.conf.default
+          cat feeds.conf.default
+
+      - name: 更新并安装 feeds
+        working-directory: sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 生成配置并选中 homebox / luci-app-homebox
+        working-directory: sdk
+        run: |
+          make defconfig
+          echo "CONFIG_PACKAGE_homebox=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-homebox=y" >> .config
+          # 关键：homebox 包的写法依赖 host 编译产物在 target 阶段还存在，
+          # 但 AUTOREMOVE 会在 host-compile 完成后立刻清空 build_dir/hostpkg/homebox，
+          # 必须关掉这个选项，否则 100% 会在 cp build/static 这一步报错。
+          echo "# CONFIG_AUTOREMOVE is not set" >> .config
+          make defconfig
+
+      - name: 切换到 Node 14（homebox 前端用的是2020年的 Parcel v1，新版 Node 的 OpenSSL3 会让它直接崩溃）
+        uses: actions/setup-node@v4
+        with:
+          node-version: "14"
+
+      - name: 编译 homebox（包含 Go + npm 前端构建，耐心等待）
+        working-directory: sdk
+        run: |
+          node -v && npm -v
+          make package/feeds/jjm2473/homebox/compile V=s -j$(nproc)
+
+      - name: 校验 homebox host 端前端是否真的构建出来了
+        working-directory: sdk
+        run: |
+          STATIC_DIR=$(find build_dir/hostpkg -maxdepth 4 -type d -path "*homebox*/build/static" | head -n1)
+          if [ -z "$STATIC_DIR" ]; then
+            echo "::error::hostpkg 阶段没有生成 build/static，前端构建实际是失败的，请看上一步日志里 npm run build / parcel 的报错"
+            find build_dir/hostpkg -iname "*homebox*" -maxdepth 3
+            exit 1
+          fi
+          echo "OK: $STATIC_DIR"
+          ls "$STATIC_DIR"
+
+      - name: 编译 luci-app-homebox
+        working-directory: sdk
+        run: |
+          make package/feeds/jjm2473/luci-app-homebox/compile V=s -j$(nproc)
+
+      - name: 收集产物
+        working-directory: sdk
+        run: |
+          mkdir -p ../artifacts
+          find bin/packages -iname "*homebox*" -print -exec cp {} ../artifacts/ \;
+          ls -la ../artifacts
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-homebox-${{ inputs.target }}-${{ inputs.subtarget }}
+          path: artifacts/*
+          if-no-files-found: error
