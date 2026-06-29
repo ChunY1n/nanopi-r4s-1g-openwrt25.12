@@ -56,7 +56,7 @@ jobs:
   build:
     needs: check-update
     if: needs.check-update.outputs.should_build == 'true'
-    runs-on: [self-hosted, wsl2]   # 改成你注册 runner 时实际打的标签
+    runs-on: ubuntu-22.04   # 改成你注册 runner 时实际打的标签
     timeout-minutes: 300
     steps:
       - name: 安装编译依赖（已装过的会自动跳过，很快）
