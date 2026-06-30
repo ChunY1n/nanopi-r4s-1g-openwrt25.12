@@ -1,4 +1,4 @@
-name: 自动编译 OpenWrt 固件 (NanoPi R4S 1G 修复版 / 自托管 WSL2)
+name: openwrt official only add r4s 1g patch
 
 # 设计目标：
 #   - 始终跟踪 openwrt/openwrt 的 openwrt-25.12 分支最新代码（包含未来的 25.12.5 / 25.12.6 ... 点版本更新）
